@@ -46,12 +46,12 @@ class Grabber
     @strategies ||= []
   end
 
-  def self.download_and_extract(name, urls)
-    $l.info "Downloading and extracting #{name.inspect}"
+  def self.grab(name, urls)
+    $l.info "Grabbing #{name.inspect}"
     handler = strategy_for(name, urls)
     $l.info "Using handler #{handler.inspect} for #{name.inspect}"
     raise "can't find strategy to handle: #{name.inspect} (#{urls.inspect})" unless handler
-    handler.new(name, urls).download_and_extract
+    handler.new(name, urls).call
   end
 
   def self.strategy_for(name, urls)
@@ -74,13 +74,16 @@ class Grabber
       self.urls = urls
     end
 
-    def download_and_extract
+    def call
       $l.info "Downloading starting"
       download
       $l.info "Downloading finished"
       $l.info "Extraction started"
       extract
       $l.info "Extraction finished"
+      $l.info "Installation started"
+      install
+      $l.info "Installation finished"
     end
 
     def download
@@ -89,6 +92,10 @@ class Grabber
 
     def extract
       raise NotImplementedError, "#{self.class} needs to override #extract"
+    end
+
+    def install
+      raise NotImplementedError, "#{self.class} needs to override #install"
     end
 
     def cache_path
@@ -111,69 +118,106 @@ class Grabber
     end
   end
 
-  # class ZipStrategy < StrategyBase
-  #   def self.handle?(name, urls)
-  #     urls.all? {|x| x[/zip\z/i] }
-  #   end
-  # end
-
-  class OVAStrategy < StrategyBase
-    def self.handle?(name, urls)
-      urls.all? {|x| x[/ova\z/i] }
-    end
-
+  module DownloadFiles
+    # Downloads all available urls as files to the cache path
     def download
-      $l.info "(OVA) downloading started for #{name.inspect}"
+      $l.info "(#{self.class}) downloading started for #{name.inspect}"
+
       urls.each do |uri|
         destination = cache_path_for(uri.filename)
 
         unless File.exist?(destination)
-          download_file(from: uri, to: destination)
+          http = Net::HTTP.new(uri.host, uri.port)
+          http.use_ssl = true
+          http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+          # Write out file as we receive it
+          File.open(destination, "w+") do |f|
+            http.request_get(uri.path) do |resp|
+              original_length = resp["content-length"].to_f
+              remaining = original_length.to_f
+
+              resp.read_body do |chunk|
+                f.write(chunk)
+                remaining -= chunk.length
+                puts "#{(remaining / original_length * 100.0).round(2)}% left"
+              end
+            end
+          end
+
         end
       end
-      $l.info "(OVA) downloading finished for #{name.inspect}"
-    end
 
-    def extract
-      $l.info "(OVA) extraction started for #{name.inspect}"
+      $l.info "(#{self.class}) downloading finished for #{name.inspect}"
+    end
+  end
+
+  module GenericInstaller
+    # Takes all available .ova packages, installs them with VBoxManage and takes an initial snapshot
+    def install
+      $l.info "(#{self.class}) installation started for #{name.inspect}"
       Dir[cache_path_for("*.ova")].each do |vm_archive|
         Vbox.destroy(name)
         Vbox.install(vm_archive, as: name)
         Vbox.snapshot(name, "Initial State", description: "Original unbooted pristine state")
       end
-      $l.info "(OVA) extraction finished for #{name.inspect}"
-    end
-
-    def download_file opts={}
-      uri = opts.fetch(:from)
-      destination = opts.fetch(:to)
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = true
-      http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-      # Write out file as we receive it
-      File.open(destination, "w+") do |f|
-        http.request_get(uri.path) do |resp|
-          original_length = resp["content-length"].to_f
-          remaining = original_length.to_f
-
-          resp.read_body do |chunk|
-            f.write(chunk)
-            remaining -= chunk.length
-            puts "#{(remaining / original_length * 100.0).round(2)}% left"
-          end
-        end
-      end
-
+      $l.info "(#{self.class}) installation finished for #{name.inspect}"
     end
   end
 
-  # class RARStrategy < StrategyBase
-  #   def self.handle?(name, urls)
-  #     urls.first[/sfx\z/i] && urls[1..-1].all? {|x| x[/rar\z/i] }
-  #   end
-  # end
+  class ZipStrategy < StrategyBase
+    include DownloadFiles
+    include GenericInstaller
+
+    def self.handle?(name, urls)
+      urls.all? {|x| x[/zip\z/i] }
+    end
+
+    # def extract
+    # end
+  end
+
+  class OVAStrategy < StrategyBase
+    include DownloadFiles
+    include GenericInstaller
+
+    def self.handle?(name, urls)
+      urls.all? {|x| x[/ova\z/i] }
+    end
+
+    def extract
+    end
+  end
+
+  class RARStrategy < StrategyBase
+    include DownloadFiles
+    include GenericInstaller
+
+    UNRAR = %x{which unrar}.chomp
+
+    def self.handle?(name, urls)
+      urls.first[/sfx\z/i] && urls[1..-1].all? {|x| x[/rar\z/i] }
+    end
+
+    def extract
+      $l.info "(#{self.class}) extraction started for #{name.inspect}"
+
+      Dir[cache_path_for("*.sfx")].each do | sfx |
+        cmd_and_args = [
+          UNRAR,
+          "x", # extract
+          "-o+", # overwrite
+          sfx, # from
+          cache_path, # to
+        ]
+        IO.popen(cmd_and_args) do |io|
+          print io.read
+        end
+      end
+
+      $l.info "(#{self.class}) extraction finished for #{name.inspect}"
+    end
+  end
 
 end
 
@@ -181,25 +225,25 @@ class Vbox
   def self.install vm_archive, opts={}
     vmname = opts.fetch(:as)
 
-    $l.info "[VBOX] Importing #{vm_archive.inspect} as #{vmname.inspect}"
+    $l.info "[#{self}] Importing #{vm_archive.inspect} as #{vmname.inspect}"
     run("import", vm_archive, "--vsys", "0", "--vmname", vmname)
-    $l.info "[VBOX] Finished import of #{vmname.inspect}"
+    $l.info "[#{self}] Finished import of #{vmname.inspect}"
   end
 
   def self.snapshot vmname, snapshot_name, opts={}
     description = opts[:description]
 
-    $l.info "[VBOX] Snapshotting #{vmname.inspect} as #{snapshot_name.inspect}"
+    $l.info "[#{self}] Snapshotting #{vmname.inspect} as #{snapshot_name.inspect}"
 
     command_args = ["snapshot", vmname, "take", snapshot_name]
     (command_args << "--description" << description) if description
 
     run(*command_args)
-    $l.info "[VBOX] Finished snapshotting #{vmname.inspect}"
+    $l.info "[#{self}] Finished snapshotting #{vmname.inspect}"
   end
 
   def self.list_vms
-    a = run *%w(list vms)
+    a = run "list", "vms"
     a.split("\n").map do |line|
       name, identifier = line.split(" ")
       {name: name.tr('"', ""), identifier: identifier.tr("{}", "")}
@@ -207,23 +251,23 @@ class Vbox
   end
 
   def self.destroy vmname
-    $l.info "[VBOX] Destroying #{vmname.inspect}"
+    $l.info "[#{self}] Destroying #{vmname.inspect}"
     if list_vms.find {|data| data[:name] == vmname }
       run "unregistervm", vmname, "--delete"
     else
       puts "WARN: couldn't find VM named #{vmname.inspect} to destroy"
       true
     end
-    $l.info "[VBOX] Destroyed #{vmname.inspect}"
+    $l.info "[#{self}] Destroyed #{vmname.inspect}"
   end
 
   # Runs the command, printing output as it's given, and returns output as a string
   def self.run *args
     output = ""
     cmd_args = %w(/usr/bin/VBoxManage) | args
-    p cmd_args
+    $l.info "[#{self}] run(#{cmd_args.inspect})"
     IO.popen(cmd_args) do |io|
-      print output << (chunk = io.read)
+      print output << io.read
     end
     output
   end
@@ -246,11 +290,8 @@ unless to_grab && (to_grab == "all" || VMS.keys.include?(to_grab))
   exit(1)
 end
 
-
 # Do stuff!
-Grabber.download_and_extract(to_grab, VMS[to_grab])
-
-
+Grabber.grab(to_grab, VMS[to_grab])
 
 __END__
 # Manually scraped from http://www.modern.ie/en-us/virtualization-tools#downloads
