@@ -13,13 +13,12 @@ require "net/https"
 
 # TODO: use methadone or GLI
 
-STORE = File.expand_path("~/.fa-ievms")
-FileUtils.mkdir_p(STORE)
-
 VMS = YAML.load(DATA)
 # Downcase all the keys in the hash
 VMS.dup.each { |k, v| VMS[k.downcase] = VMS.delete(k) }
 
+# Rudimentary logging
+# TODO: swap in Logger instance
 $l = Object.new
 def $l.info msg
   puts " >> #{msg}"
@@ -29,13 +28,10 @@ def usage
   puts <<-USAGE
 #{$0} [VM name]
 
+Downloads and installs into virtualbox the free ie virtual machines from microsoft - http://www.modern.ie/en-us/virtualization-tools#downloads
+
 Available VM names:
-  - all
 #{VMS.keys.map {|x| "  - #{x}" }.join("\n")}
-
-"all" will grab all VMs
-
-They are stored in #{STORE}
 USAGE
 end
 
@@ -250,15 +246,9 @@ unless to_grab && (to_grab == "all" || VMS.keys.include?(to_grab))
   exit(1)
 end
 
-if to_grab == "all"
-  VMS.keys.each do |to_grab|
-    # Do stuff!
-    # Grabber.download_and_extract(to_grab, VMS[to_grab])
-  end
-else
-  # Do stuff!
-  Grabber.download_and_extract(to_grab, VMS[to_grab])
-end
+
+# Do stuff!
+Grabber.download_and_extract(to_grab, VMS[to_grab])
 
 
 
