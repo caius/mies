@@ -3,7 +3,7 @@
 # DEBUG
 if ENV["TM_APP_IDENTIFIER"]
   # Running under TextMate
-  ARGV << "IE8_XP"
+  # ARGV << "IE8_XP"
 end
 
 require "yaml"
@@ -23,16 +23,12 @@ $l = Object.new
 def $l.info msg
   puts " >> #{msg}"
 end
-
-def usage
-  puts <<-USAGE
-#{$0} [VM name]
-
-Downloads and installs into virtualbox the free ie virtual machines from microsoft - http://www.modern.ie/en-us/virtualization-tools#downloads
-
-Available VM names:
-#{VMS.keys.map {|x| "  - #{x}" }.join("\n")}
-USAGE
+def $l.debug msg
+  puts "D #{msg}" if $DEBUG
+end
+def $l.fatal msg
+  puts "ERROR: #{msg}"
+  exit 1
 end
 
 module URIFilename
@@ -46,16 +42,10 @@ class Grabber
     @strategies ||= []
   end
 
-  def self.grab(name, urls)
-    $l.info "Grabbing #{name.inspect}"
-    handler = strategy_for(name, urls)
-    $l.info "Using handler #{handler.inspect} for #{name.inspect}"
-    raise "can't find strategy to handle: #{name.inspect} (#{urls.inspect})" unless handler
-    handler.new(name, urls).call
-  end
-
   def self.strategy_for(name, urls)
-    strategies.find { |s| s.handle?(name, urls) }
+    handler_class = strategies.find { |s| s.handle?(name, urls) }
+    raise("can't find strategy to handle: #{name.inspect} #{urls.inspect}") unless handler_class
+    handler_class.new(name, urls)
   end
 
   class StrategyBase
@@ -72,18 +62,6 @@ class Grabber
     def initialize(name, urls)
       self.name = name
       self.urls = urls
-    end
-
-    def call
-      $l.info "Downloading starting"
-      download
-      $l.info "Downloading finished"
-      $l.info "Extraction started"
-      extract
-      $l.info "Extraction finished"
-      $l.info "Installation started"
-      install
-      $l.info "Installation finished"
     end
 
     def download
@@ -126,7 +104,9 @@ class Grabber
       urls.each do |uri|
         destination = cache_path_for(uri.filename)
 
-        unless File.exist?(destination)
+        if File.exist?(destination)
+          $l.info "#{File.basename(destination)} already exists!"
+        else
           http = Net::HTTP.new(uri.host, uri.port)
           http.use_ssl = true
           http.verify_mode = OpenSSL::SSL::VERIFY_NONE
@@ -157,9 +137,11 @@ class Grabber
     def install
       $l.info "(#{self.class}) installation started for #{name.inspect}"
       Dir[cache_path_for("*.ova")].each do |vm_archive|
-        Vbox.destroy(name)
-        Vbox.install(vm_archive, as: name)
-        Vbox.snapshot(name, "Initial State", description: "Original unbooted pristine state")
+        VirtualBox.manager.tap do |vm|
+          vm.destroy(name)
+          vm.install(vm_archive, as: name)
+          vm.snapshot(name, "Initial State", description: "Original unbooted pristine state")
+        end
       end
       $l.info "(#{self.class}) installation finished for #{name.inspect}"
     end
@@ -173,8 +155,16 @@ class Grabber
       urls.all? {|x| x[/zip\z/i] }
     end
 
-    # def extract
-    # end
+    def extract
+      $l.info "(#{self.class}) Extraction started"
+      cmd_args = ["unzip", "-o", cache_path_for("*.zip"), "-d", cache_path]
+      $l.debug cmd_args
+      IO.popen(cmd_args) do |io|
+        chunk = io.read
+        $l.debug chunk
+      end
+      $l.info "(#{self.class}) Extraction finished"
+    end
   end
 
   class OVAStrategy < StrategyBase
@@ -186,6 +176,7 @@ class Grabber
     end
 
     def extract
+      # noop
     end
   end
 
@@ -211,7 +202,8 @@ class Grabber
           cache_path, # to
         ]
         IO.popen(cmd_and_args) do |io|
-          print io.read
+          chunk = io.read
+          $l.debug chunk
         end
       end
 
@@ -221,120 +213,220 @@ class Grabber
 
 end
 
-class Vbox
-  def self.install vm_archive, opts={}
-    vmname = opts.fetch(:as)
-
-    $l.info "[#{self}] Importing #{vm_archive.inspect} as #{vmname.inspect}"
-    run("import", vm_archive, "--vsys", "0", "--vmname", vmname)
-    $l.info "[#{self}] Finished import of #{vmname.inspect}"
+module VirtualBox
+  def self.manager
+    @manager ||= Manager.new
   end
 
-  def self.snapshot vmname, snapshot_name, opts={}
-    description = opts[:description]
+  class Manager
+    def install vm_archive, opts={}
+      vmname = opts.fetch(:as)
 
-    $l.info "[#{self}] Snapshotting #{vmname.inspect} as #{snapshot_name.inspect}"
+      $l.info "[#{self}] Importing #{vm_archive.inspect} as #{vmname.inspect}"
+      run("import", vm_archive, "--vsys", "0", "--vmname", vmname)
+      $l.info "[#{self}] Finished import of #{vmname.inspect}"
+    end
 
-    command_args = ["snapshot", vmname, "take", snapshot_name]
-    (command_args << "--description" << description) if description
+    def snapshot vmname, snapshot_name, opts={}
+      description = opts[:description]
 
-    run(*command_args)
-    $l.info "[#{self}] Finished snapshotting #{vmname.inspect}"
-  end
+      $l.info "[#{self}] Snapshotting #{vmname.inspect} as #{snapshot_name.inspect}"
 
-  def self.list_vms
-    a = run "list", "vms"
-    a.split("\n").map do |line|
-      name, identifier = line.split(" ")
-      {name: name.tr('"', ""), identifier: identifier.tr("{}", "")}
+      command_args = ["snapshot", vmname, "take", snapshot_name]
+      (command_args << "--description" << description) if description
+
+      run(*command_args)
+      $l.info "[#{self}] Finished snapshotting #{vmname.inspect}"
+    end
+
+    def list_vms
+      a = run "list", "vms"
+      a.split("\n").map do |line|
+        name, identifier = line.split(" ")
+        {name: name.tr('"', ""), identifier: identifier.tr("{}", "")}
+      end
+    end
+
+    def destroy vmname
+      $l.info "[#{self}] Destroying #{vmname.inspect}"
+      if list_vms.find {|data| data[:name] == vmname }
+        run "unregistervm", vmname, "--delete"
+      else
+        puts "WARN: couldn't find VM named #{vmname.inspect} to destroy"
+        true
+      end
+      $l.info "[#{self}] Destroyed #{vmname.inspect}"
+    end
+
+    # Runs the command, printing output as it's given, and returns output as a string
+    def run *args
+      output = ""
+      cmd_args = %w(/usr/bin/VBoxManage) | args
+      $l.debug "[#{self}] run(#{cmd_args.inspect})"
+      IO.popen(cmd_args) do |io|
+        output << (chunk = io.read)
+        $l.debug(chunk)
+      end
+      output
     end
   end
+end
 
-  def self.destroy vmname
-    $l.info "[#{self}] Destroying #{vmname.inspect}"
-    if list_vms.find {|data| data[:name] == vmname }
-      run "unregistervm", vmname, "--delete"
+class Command
+  attr_accessor :args
+
+  def initialize(args)
+    self.args = args
+  end
+
+  def flag_given? flag
+    args.any? {|x| x == flag }
+  end
+
+  Error = Class.new(RuntimeError)
+end
+
+class Help < Command
+  def call
+    puts <<-USAGE
+Downloads and installs into virtualbox the free ie virtual machines from microsoft - http://www.modern.ie/en-us/virtualization-tools#downloads
+
+#{File.basename($0)} COMMAND [ARGS]
+
+Available commands:
+#{COMMANDS.keys.map {|x| "  #{x}"}.join("\n")}
+
+Available VM names:
+#{VMS.keys.map {|x| "  #{x}" }.join("\n")}
+USAGE
+    exit 2
+  end
+end
+
+class Download < Command
+  def name
+    @name ||= args.shift
+  end
+
+  def urls
+    @urls ||= VMS[name]
+  end
+
+  def call
+    raise Error, "Missing valid VM identifier" unless name && VMS.keys.include?(name.downcase)
+
+    handler = Grabber.strategy_for(name, urls)
+    handler.download
+  end
+
+  def vm_exists?(name)
+    VirtualBox.manager.list_vms.find {|x| x[:name] == name }
+  end
+end
+
+class Install < Download
+  def name
+    @name ||= args.shift
+  end
+
+  def urls
+    @urls ||= VMS[name]
+  end
+
+  def call
+    raise Error, "Missing valid VM identifier" unless name && VMS.keys.include?(name.downcase)
+
+    if vm_exists?(name) && !flag_given?("--force")
+      raise Error, "VM exists and --force not passed"
     else
-      puts "WARN: couldn't find VM named #{vmname.inspect} to destroy"
-      true
+      handler = Grabber.strategy_for(name, urls)
+      handler.download
+      handler.extract
+      handler.install
     end
-    $l.info "[#{self}] Destroyed #{vmname.inspect}"
   end
 
-  # Runs the command, printing output as it's given, and returns output as a string
-  def self.run *args
-    output = ""
-    cmd_args = %w(/usr/bin/VBoxManage) | args
-    $l.info "[#{self}] run(#{cmd_args.inspect})"
-    IO.popen(cmd_args) do |io|
-      print output << io.read
-    end
-    output
+  def vm_exists?(name)
+    VirtualBox.manager.list_vms.find {|x| x[:name] == name }
   end
 end
 
+class VirtualBoxCommand < Command
+  def call
+    subcommand = args.shift
+    raise Error, "Missing subcommand" unless subcommand && respond_to?(subcommand)
+    public_send(subcommand)
+  end
 
-# If there are no arguments, or -h, --help, help is passed, print out help and exit
-if ARGV.empty? || ARGV.find {|x| %w(-h --help help).include?(x) }
-  usage
-  exit(1)
+  def list
+    puts VirtualBox.manager.list_vms
+  end
+
+  def destroy
+    identifier = args.shift
+    raise Error, "Missing identifier" unless identifier
+    VirtualBox.manager.destroy(identifier)
+  end
 end
 
-# Check we can handle the ARGV given; print help and exit if not
-# TODO: handle more than one VM being passed, currently we only take the first one
-to_grab = ARGV.first.dup
-to_grab.downcase! if to_grab
-unless to_grab && (to_grab == "all" || VMS.keys.include?(to_grab))
-  puts "ERR: unrecognised vm #{to_grab.inspect}\n\n"
-  usage
-  exit(1)
-end
+COMMANDS = {
+  "help" => Help,
+  "download" => Download,
+  "install" => Install,
+  "virtualbox" => VirtualBoxCommand
+}
 
-# Do stuff!
-Grabber.grab(to_grab, VMS[to_grab])
+begin
+  args = ARGV.dup
+  name= args.shift
+  $c = COMMANDS[name] || Help
+  $c.new(args).call
+rescue Command::Error => e
+  $l.fatal e.message
+  Help.new(ARGV).call
+end
 
 __END__
-# Manually scraped from http://www.modern.ie/en-us/virtualization-tools#downloads
 ---
-IE6_WinXP:
-  - "https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE6_WinXP.ova.zip"
+IE6_XP:
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE6_WinXP.ova.zip
 IE8_XP:
-  - "https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_XP/IE8.XP.For.MacVirtualBox.ova"
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_XP/IE8.XP.For.MacVirtualBox.ova
 IE7_Vista:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part3.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part4.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part5.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part3.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part4.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE7_Vista/IE7.Vista.For.MacVirtualBox.part5.rar
 IE8_Win7:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part3.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part4.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part5.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part6.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part3.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part4.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part5.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE8_Win7/IE8.Win7.For.MacVirtualBox.part6.rar
 IE9_Win7:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part3.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part4.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part5.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part3.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part4.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE9_Win7/IE9.Win7.For.MacVirtualBox.part5.rar
 IE10_Win7:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part3.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part4.rar
-IE11_Win7:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7/IE11.Win7.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7/IE11.Win7.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7/IE11.Win7.For.MacVirtualBox.part3.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7/IE11.Win7.For.MacVirtualBox.part4.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7/IE11.Win7.For.MacVirtualBox.part5.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part3.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win7/IE10.Win7.For.MacVirtualBox.part4.rar
+IE11preview_Win7:
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7_2/IE11.Win7.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7_2/IE11.Win7.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7_2/IE11.Win7.For.MacVirtualBox.part3.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7_2/IE11.Win7.For.MacVirtualBox.part4.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win7_2/IE11.Win7.For.MacVirtualBox.part5.rar
 IE10_Win8:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win8/IE10.Win8.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win8/IE10.Win8.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win8/IE10.Win8.For.MacVirtualBox.part3.rar
-IE11_Win81:
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win81/IE11.Win8.1Preview.For.MacVirtualBox.part1.sfx
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win81/IE11.Win8.1Preview.For.MacVirtualBox.part2.rar
-  - https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win81/IE11.Win8.1Preview.For.MacVirtualBox.part3.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win8/IE10.Win8.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win8/IE10.Win8.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE10_Win8/IE10.Win8.For.MacVirtualBox.part3.rar
+IE11preview_Win8.1:
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win81/IE11.Win8.1Preview.For.MacVirtualBox.part1.sfx
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win81/IE11.Win8.1Preview.For.MacVirtualBox.part2.rar
+- https://az412801.vo.msecnd.net/vhd/IEKitV1_Final/VirtualBox/OSX/IE11_Win81/IE11.Win8.1Preview.For.MacVirtualBox.part3.rar
