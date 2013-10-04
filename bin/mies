@@ -1,4 +1,5 @@
 #!/usr/bin/env ruby
+# encoding: UTF-8
 
 # DEBUG
 if ENV["TM_APP_IDENTIFIER"]
@@ -28,7 +29,6 @@ def $l.debug msg
 end
 def $l.fatal msg
   puts "ERROR: #{msg}"
-  exit 1
 end
 
 module URIFilename
@@ -334,9 +334,6 @@ Downloads and installs into virtualbox the free ie virtual machines from microso
 
 Available commands:
 #{COMMANDS.keys.map {|x| "  #{x}"}.join("\n")}
-
-Available VM names:
-#{VMS.keys.map {|x| "  #{x}" }.join("\n")}
 USAGE
     exit 2
   end
@@ -373,6 +370,13 @@ class Download < Command
 
   def vm_exists?(name)
     VirtualBox.manager.list_vms.find {|x| x[:name] == name }
+  end
+
+  def extra_command_help
+    <<-EOF
+Available VM names:
+#{VMS.keys.map {|x| "  #{x}" }.join("\n")}
+    EOF
   end
 end
 
@@ -431,10 +435,12 @@ COMMANDS = {
 begin
   args = ARGV.dup
   name= args.shift
-  $c = COMMANDS[name] || Help
-  $c.new(args).call
+  command = COMMANDS[name] || Help
+  $c = command.new(args)
+  $c.call
 rescue Command::Error => e
   $l.fatal e.message
+  $l.info $c.extra_command_help if $c && $c.respond_to?(:extra_command_help)
   Help.new(ARGV).call
 end
 
