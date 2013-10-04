@@ -1,12 +1,6 @@
 #!/usr/bin/env ruby
 # encoding: UTF-8
 
-# DEBUG
-if ENV["TM_APP_IDENTIFIER"]
-  # Running under TextMate
-  # ARGV << "IE8_XP"
-end
-
 require "yaml"
 require "fileutils"
 require "uri"
