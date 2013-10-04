@@ -42,14 +42,14 @@ class Grabber
     @strategies ||= []
   end
 
-  def self.strategy_for(name, urls)
-    handler_class = strategies.find { |s| s.handle?(name, urls) }
+  def self.strategy_for(*args)
+    handler_class = strategies.find { |s| s.handle?(*args[0..1]) }
     raise("can't find strategy to handle: #{name.inspect} #{urls.inspect}") unless handler_class
-    handler_class.new(name, urls)
+    handler_class.new(*args)
   end
 
   class StrategyBase
-    attr_reader :name, :urls
+    attr_reader :name, :urls, :opts
 
     def self.inherited(klass)
       Grabber.strategies << klass
@@ -59,9 +59,10 @@ class Grabber
       raise NotImplementedError, "#{self} needs to override .handle?"
     end
 
-    def initialize(name, urls)
+    def initialize(name, urls, opts={})
       self.name = name
       self.urls = urls
+      self.opts = opts || {}
     end
 
     def download
@@ -89,7 +90,7 @@ class Grabber
     end
 
     private
-    attr_writer :name
+    attr_writer :name, :opts
 
     def urls= arr
       @urls = arr.map {|u| URI(u).tap {|uri| uri.extend(URIFilename) } }
@@ -97,8 +98,15 @@ class Grabber
   end
 
   module DownloadFiles
+    attr_accessor :local_fetch_path
+
+    def initialize(*)
+      super
+      self.local_fetch_path = opts.fetch(:local_fetch_path, nil)
+    end
+
     # Downloads all available urls as files to the cache path
-    def download
+    def download_remote_files
       $l.info "(#{self.class}) downloading started for #{name.inspect}"
 
       urls.each do |uri|
@@ -129,6 +137,37 @@ class Grabber
       end
 
       $l.info "(#{self.class}) downloading finished for #{name.inspect}"
+    end
+
+    def download
+      if can_fetch_locally?
+        fetch_local_files
+      else
+        # download_remote_files
+        $l.fatal "DOWNLOAD_REMOTE_FILES"
+      end
+    end
+
+    def can_fetch_locally?
+      return unless local_fetch_path
+      available_filenames = available_files.map {|x| File.basename(x) }.uniq
+      urls.all? {|u| available_filenames.include?(u.filename) }
+    end
+
+    def available_files
+      @available_files ||= Dir[File.join(local_fetch_path, "**", "*")]
+    end
+
+    def fetch_local_files
+      urls.each do |u|
+        local_file = available_files.find {|path| File.basename(path) == u.filename }
+        if File.exist?(cache_path_for(u.filename))
+          $l.info "#{u.filename} already cached, skipping"
+        else
+          $l.info "Copying #{local_file.inspect} into cache"
+          FileUtils.cp_r(local_file, cache_path_for(u.filename))
+        end
+      end
     end
   end
 
@@ -304,6 +343,19 @@ USAGE
 end
 
 class Download < Command
+  attr_accessor :opts
+
+  def initialize(*)
+    super
+
+    self.opts ||= {}
+
+    if (( i = args.index("--fetch-path") ))
+      args.delete_at(i)
+      opts[:local_fetch_path] = args.delete_at(i)
+    end
+  end
+
   def name
     @name ||= args.shift
   end
@@ -315,7 +367,7 @@ class Download < Command
   def call
     raise Error, "Missing valid VM identifier" unless name && VMS.keys.include?(name.downcase)
 
-    handler = Grabber.strategy_for(name, urls)
+    handler = Grabber.strategy_for(name, urls, opts)
     handler.download
   end
 
@@ -339,7 +391,7 @@ class Install < Download
     if vm_exists?(name) && !flag_given?("--force")
       raise Error, "VM exists and --force not passed"
     else
-      handler = Grabber.strategy_for(name, urls)
+      handler = Grabber.strategy_for(name, urls, opts)
       handler.download
       handler.extract
       handler.install
