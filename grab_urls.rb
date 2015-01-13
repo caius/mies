@@ -3,58 +3,31 @@
 
 require "nokogiri"
 require "yaml"
+require "json"
+require "pp"
 
 original_pos = DATA.pos
 grab_data = DATA.read.strip.size == 0
 DATA.seek(original_pos)
-if grab_data
-  require "capybara"
-  require "capybara-webkit"
+body = if grab_data
+  require "net/https"
 
-  Capybara.configure do |c|
-    c.default_driver = :webkit
-    c.current_driver = :webkit
-    c.javascript_driver = :webkit
-  end
-
-  include Capybara::DSL
-
-  visit "http://www.modern.ie/en-us/virtualization-tools"
-
-  find("a.expandable-title", text: "Get free VMs").click
-
-  %w{
-    $("a.expandable-title[href=\"#downloads\"]").click()
-    $("#os-select").val("mac").change()
-    $("#platform-select").val("virtbox").change()
-  }.each do |js|
-    page.execute_script(js)
-  end
-
-  File.open(__FILE__, "a+") do |f|
-    f.seek(DATA.pos)
-    f.puts page.body
-  end
+  Net::HTTP.get(URI("https://www.modern.ie/en-us/virtualization-tools"))
+else
+  DATA.read
 end
 
-doc = Nokogiri::HTML(DATA.read)
-os_lists = doc.search("#platform-links li")
+doc = Nokogiri::HTML(body)
+data_script = doc.search("script").find { |script| script.text[/vmListJSON/] }
+data_json = data_script.to_s[/d\.osList=(\[.+\]);/m, 1]
+mac_data = JSON.parse(data_json).find { |d| d["osName"].downcase == "mac" }
+virtualbox_data = mac_data["softwareList"].find { |s| s["softwareName"].downcase == "virtualbox" }
 
-data = os_lists.inject(Hash.new) do |d, li|
-  next(d) unless li.search("div.platform-partial-cell").first
+print virtualbox_data["browsers"].each_with_object({}) { |browser, url_data|
+  name = "IE%s_%s" % [browser["version"], browser["osVersion"]]
+  files = browser["files"].map { |f| f["url"] }.find { |f| f[/\.zip\z/] }
 
-  name = li.search("p.cta").first.text
-  urls = li.search(".platform-link-partial").map {|x| x[:href] }
-
-  name.sub!("RP", "Preview")
-  name.sub!(" Preview", "preview")
-  name.sub!(/Win7.+/, "Win7")
-  name.sub!(/ [-–] /, "_")
-
-  d[name] = urls
-  d
-end
-
-print data.to_yaml
+  url_data[name] = [files]
+}.to_yaml
 
 __END__
