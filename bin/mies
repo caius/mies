@@ -122,7 +122,7 @@ class Grabber
               resp.read_body do |chunk|
                 f.write(chunk)
                 remaining -= chunk.length
-                puts "#{(remaining / original_length * 100.0).round(2)}% left"
+                print " #{(100 - (remaining / original_length * 100.0)).round(2)}% downloaded\r"
               end
             end
           end
@@ -130,6 +130,7 @@ class Grabber
         end
       end
 
+      puts
       $l.info "(#{self.class}) downloading finished for #{name.inspect}"
     end
 
