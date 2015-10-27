@@ -1,5 +1,7 @@
 # MIEs
 
+⚠️ Untested for a while. Might not work with modern.ie redesign changes. Happily, those changes include a single file download for VirtualBox now. ⚠️
+
 Modern IEs helper tool. Lets you easily download & install various versions of Internet Explorer from IE6 through IE11 in VMs provided by Microsoft.
 
 Alpha `mies` binary currently:
